@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Coordinates Puller</title>
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <!-- Custom Stylesheet -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <header class="sidebar-header">
+        <div class="brand">
+          <i class="fa-solid fa-map-location-dot"></i>
+          <h1>Coordinates Puller</h1>
+        </div>
+        <span class="badge-free">100% Free</span>
+      </header>
+
+      <div class="sidebar-scrollable">
+        <!-- Center Search Panel -->
+        <section class="card">
+          <h2><i class="fa-solid fa-crosshairs"></i> 1. Center Coordinate</h2>
+          <div class="input-group">
+            <input type="text" id="centerInput" placeholder="Business name, address, or 'lat, lng'" autocomplete="off" />
+            <button id="searchCenterBtn" title="Search"><i class="fa-solid fa-magnifying-glass"></i></button>
+            <button id="locateMeBtn" title="Use Current Location"><i class="fa-solid fa-location-arrow"></i></button>
+          </div>
+          <div class="center-info-pill" id="centerInfoPill">
+            <span id="centerCoordsText">No center set yet (click map or search)</span>
+          </div>
+        </section>
+
+        <!-- Polygon / Circle Generator -->
+        <section class="card">
+          <h2><i class="fa-solid fa-draw-polygon"></i> 2. Polygon & Radius</h2>
+          <div class="grid-2">
+            <div>
+              <label for="radiusVal">Radius Size</label>
+              <input type="number" id="radiusVal" value="1" min="0.1" step="0.5" />
+            </div>
+            <div>
+              <label for="radiusUnit">Unit</label>
+              <select id="radiusUnit">
+                <option value="km">Kilometers (km)</option>
+                <option value="miles">Miles (mi)</option>
+                <option value="m">Meters (m)</option>
+              </select>
+            </div>
+          </div>
+          <div class="btn-row">
+            <button id="addCircleBtn" class="btn btn-primary">
+              <i class="fa-solid fa-circle-plus"></i> Add Circle Polygon
+            </button>
+            <button id="clearPolysBtn" class="btn btn-outline" title="Clear all polygons">
+              <i class="fa-solid fa-trash-can"></i>
+            </button>
+          </div>
+
+          <div class="polygons-list" id="polygonsList">
+            <!-- Active polygon tags dynamically rendered -->
+          </div>
+        </section>
+
+        <!-- Pull Coordinates / Filter -->
+        <section class="card">
+          <h2><i class="fa-solid fa-filter"></i> 3. Pull Coordinates</h2>
+          <label>Select Data Types to Extract:</label>
+          <div class="checkbox-grid">
+            <label class="chk-label">
+              <input type="checkbox" id="chkBusinesses" checked />
+              <span><i class="fa-solid fa-store"></i> Businesses & Shops</span>
+            </label>
+            <label class="chk-label">
+              <input type="checkbox" id="chkServices" checked />
+              <span><i class="fa-solid fa-utensils"></i> Amenities & Services</span>
+            </label>
+            <label class="chk-label">
+              <input type="checkbox" id="chkHouses" checked />
+              <span><i class="fa-solid fa-house"></i> Houses & Addresses</span>
+            </label>
+            <label class="chk-label">
+              <input type="checkbox" id="chkOffices" />
+              <span><i class="fa-solid fa-building"></i> Commercial Offices</span>
+            </label>
+          </div>
+
+          <div class="field-margin">
+            <label for="circleProximityMode">Target Placement:</label>
+            <select id="circleProximityMode">
+              <option value="nearCircle" selected>Near Each Circle (Closest to circle line)</option>
+              <option value="entireRing">Anywhere Inside Ring Area</option>
+            </select>
+          </div>
+
+          <div class="field-margin" id="corridorGroup">
+            <label for="circleCorridorMeters">Near Circle Tolerance Width:</label>
+            <div class="input-with-suffix">
+              <input type="number" id="circleCorridorMeters" value="200" min="20" step="25" />
+              <span>meters from circle line</span>
+            </div>
+          </div>
+
+          <div class="field-margin">
+            <label for="bufferDistance">Near Polygon Buffer (find items nearby):</label>
+            <div class="input-with-suffix">
+              <input type="number" id="bufferDistance" value="50" min="0" step="25" />
+              <span>meters outside</span>
+            </div>
+          </div>
+
+          <div class="field-margin">
+            <label for="maxCoordsInput">Max Coordinates to Pull:</label>
+            <div class="input-with-suffix">
+              <input type="number" id="maxCoordsInput" value="100" min="1" step="10" placeholder="100" />
+              <span>max points (0 = all)</span>
+            </div>
+          </div>
+
+          <div class="field-margin">
+            <label for="ringOrderStrategy">Ring Pull Strategy:</label>
+            <select id="ringOrderStrategy">
+              <option value="roundrobin" selected>Cycle Rings & Repeat (Ring 1 -> Ring 2 -> Ring 3... repeat)</option>
+              <option value="sequential">Sequential (All Ring 1, then next ring...)</option>
+            </select>
+          </div>
+
+          <button id="pullDataBtn" class="btn btn-success full-width">
+            <i class="fa-solid fa-cloud-arrow-down"></i> Pull Coordinates Inside / Near
+          </button>
+          <div id="pullStatus" class="status-msg hidden"></div>
+        </section>
+
+        <!-- Manual Mode -->
+        <section class="card">
+          <h2><i class="fa-solid fa-location-pin"></i> 4. Manual Coordinate Pin</h2>
+          <p class="hint">Toggle pin mode to click anywhere on map and record exact coordinates.</p>
+          <button id="toggleManualPinBtn" class="btn btn-secondary full-width">
+            <i class="fa-solid fa-map-pin"></i> Enable Click-to-Pin Mode
+          </button>
+        </section>
+
+        <!-- Results & Export -->
+        <section class="card">
+          <div class="results-header">
+            <h2><i class="fa-solid fa-list-check"></i> 5. Extracted Coordinates (<span id="resultsCount">0</span>)</h2>
+            <button id="clearResultsBtn" class="btn-text-danger" title="Clear table">Clear All</button>
+          </div>
+
+          <div class="search-results-bar">
+            <input type="text" id="filterResultsInput" placeholder="Filter results by name or type..." />
+          </div>
+
+          <!-- Action Buttons -->
+          <div class="export-grid">
+            <button id="exportKmlBtn" class="btn btn-export">
+              <i class="fa-solid fa-file-code"></i> KML
+            </button>
+            <button id="exportCsvBtn" class="btn btn-export">
+              <i class="fa-solid fa-file-csv"></i> CSV
+            </button>
+            <button id="exportGeoJsonBtn" class="btn btn-export">
+              <i class="fa-solid fa-code"></i> GeoJSON
+            </button>
+            <button id="copyAllCoordsBtn" class="btn btn-export">
+              <i class="fa-solid fa-copy"></i> Copy Lat,Lng
+            </button>
+          </div>
+
+          <!-- Results Table List -->
+          <div class="table-container">
+            <table id="resultsTable">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Name / Label</th>
+                  <th>Ring</th>
+                  <th>To Circle</th>
+                  <th>Type</th>
+                  <th>Latitude</th>
+                  <th>Longitude</th>
+                  <th>Dist Center</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="resultsTbody">
+                <tr class="empty-row">
+                  <td colspan="9">No coordinates pulled yet. Set center and click "Pull Coordinates" or click map.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </aside>
+
+    <!-- Map Container -->
+    <main class="map-wrapper">
+      <div id="map"></div>
+      <!-- Mode Indicator Overlay -->
+      <div id="modeBanner" class="mode-banner hidden">
+        <i class="fa-solid fa-bullseye"></i> Click map to drop coordinate pin. Click button again to exit.
+      </div>
+    </main>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <!-- Turf.js for GeoJSON Circle, Buffer, Distance, and Spatial Math -->
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
+  <!-- Application JS -->
+  <script src="app.js"></script>
+</body>
+</html>
