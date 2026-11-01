@@ -407,67 +407,114 @@ async function pullCoordinatesForPolygons(bufferMeters, options, maxCoords, ring
       maxLat = Math.max(maxLat, bbox[3]);
     }
 
-    showStatus(`Querying Overpass API across ${sortedPolys.length} ring(s)...`, 'info');
+    showStatus(`Connecting to fastest Overpass server for ${sortedPolys.length} ring(s)...`, 'info');
 
-    // 3. Build Overpass QL Query
+    // 3. Build optimized, lightning-fast Overpass QL Query
+    const targetCount = maxCoords > 0 ? maxCoords : 100;
+    const fetchLimit = Math.min(800, Math.max(250, targetCount * 3));
+
     let queryParts = [];
     if (options.wantBusinesses) {
       queryParts.push(`node["shop"](${minLat},${minLng},${maxLat},${maxLng});`);
-      queryParts.push(`node["amenity"~"restaurant|cafe|fast_food|bar|pub|supermarket|convenience"](${minLat},${minLng},${maxLat},${maxLng});`);
+      queryParts.push(`node["amenity"~"restaurant|cafe|fast_food|bar|pub|supermarket"](${minLat},${minLng},${maxLat},${maxLng});`);
     }
     if (options.wantServices) {
-      queryParts.push(`node["amenity"~"bank|pharmacy|fuel|clinic|hospital|dentist|veterinary|post_office|school|kindergarten|place_of_worship"](${minLat},${minLng},${maxLat},${maxLng});`);
+      queryParts.push(`node["amenity"~"bank|pharmacy|fuel|clinic|hospital|post_office|school"](${minLat},${minLng},${maxLat},${maxLng});`);
     }
     if (options.wantOffices) {
       queryParts.push(`node["office"](${minLat},${minLng},${maxLat},${maxLng});`);
     }
     if (options.wantHouses) {
       queryParts.push(`node["addr:housenumber"](${minLat},${minLng},${maxLat},${maxLng});`);
-      queryParts.push(`node["building"~"house|residential|apartments"](${minLat},${minLng},${maxLat},${maxLng});`);
     }
 
     const overpassQuery = `
-      [out:json][timeout:35];
+      [out:json][timeout:15];
       (
         ${queryParts.join('\n')}
       );
-      out body 2500;
+      out center ${fetchLimit};
     `;
 
+    // 4. Race top reliable Overpass mirrors simultaneously using Promise.any
     const endpoints = [
       'https://overpass-api.de/api/interpreter',
-      'https://overpass.kumi.systems/api/interpreter'
+      'https://lz4.overpass-api.de/api/interpreter',
+      'https://z.overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter',
+      'https://overpass.private.coffee/api/interpreter'
     ];
 
     let osmData = null;
-    for (const endpoint of endpoints) {
-      try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          body: 'data=' + encodeURIComponent(overpassQuery),
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    const controllers = [];
+
+    try {
+      const racePromises = endpoints.map((url) => {
+        return new Promise((resolve, reject) => {
+          const controller = new AbortController();
+          controllers.push(controller);
+          const timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error(`Timeout on ${url}`));
+          }, 10000);
+
+          fetch(url, {
+            method: 'POST',
+            body: 'data=' + encodeURIComponent(overpassQuery),
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            signal: controller.signal
+          })
+          .then(async (res) => {
+            clearTimeout(timer);
+            if (res.ok) {
+              const data = await res.json();
+              if (data && data.elements && data.elements.length > 0) {
+                return resolve(data);
+              }
+            }
+            reject(new Error(`HTTP ${res.status} from ${url}`));
+          })
+          .catch((err) => {
+            clearTimeout(timer);
+            reject(err);
+          });
         });
-        if (res.ok) {
-          osmData = await res.json();
-          break;
-        }
-      } catch (e) {
-        console.warn(`Endpoint ${endpoint} failed, trying next...`);
+      });
+
+      osmData = await Promise.any(racePromises);
+      // Abort slower pending requests
+      controllers.forEach(c => {
+        try { c.abort(); } catch (e) {}
+      });
+    } catch (err) {
+      // Sequential fallback if race encounters network blocks
+      for (const ep of endpoints.slice(0, 3)) {
+        try {
+          const res = await fetch(ep, {
+            method: 'POST',
+            body: 'data=' + encodeURIComponent(overpassQuery),
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+          });
+          if (res.ok) {
+            osmData = await res.json();
+            break;
+          }
+        } catch (e) {}
       }
     }
 
     if (!osmData || !osmData.elements) {
-      throw new Error('Overpass API returned empty or servers busy. Please try again in a few moments.');
+      throw new Error('All Overpass servers busy. Please try with a smaller radius or fewer categories.');
     }
 
-    // 4. Partition nodes into Ring Buckets (smallest ring first, then next ring excluding previous rings)
+    // 5. Partition nodes into Ring Buckets (smallest ring first, then next ring excluding previous rings)
     const ringBuckets = sortedPolys.map(() => []);
     const seenCoordKeys = new Set();
     state.results.forEach(r => seenCoordKeys.add(`${r.lat.toFixed(5)},${r.lng.toFixed(5)}`));
 
     for (const el of osmData.elements) {
-      const ptLat = el.lat;
-      const ptLng = el.lon;
+      const ptLat = el.lat || (el.center && el.center.lat);
+      const ptLng = el.lon || (el.center && el.center.lon);
       if (!ptLat || !ptLng) continue;
 
       const coordKey = `${ptLat.toFixed(5)},${ptLng.toFixed(5)}`;
@@ -566,11 +613,14 @@ async function pullCoordinatesForPolygons(bufferMeters, options, maxCoords, ring
 
 function formatOsmElement(el, center, ringName = null, ringRadiusKm = null) {
   const tags = el.tags || {};
+  const ptLat = el.lat || (el.center && el.center.lat);
+  const ptLng = el.lon || (el.center && el.center.lon);
+
   let name = tags.name || (tags['addr:housenumber'] ? `House #${tags['addr:housenumber']} ${tags['addr:street'] || ''}` : null);
   if (!name && tags.shop) name = `${tags.shop.toUpperCase()} shop`;
   if (!name && tags.amenity) name = `${tags.amenity.toUpperCase()}`;
   if (!name && tags.office) name = `${tags.office.toUpperCase()} Office`;
-  if (!name) name = `Point (${el.lat.toFixed(4)}, ${el.lon.toFixed(4)})`;
+  if (!name) name = `Point (${ptLat ? ptLat.toFixed(4) : ''}, ${ptLng ? ptLng.toFixed(4) : ''})`;
 
   let type = tags.shop ? `Shop: ${tags.shop}` :
              tags.amenity ? `Amenity: ${tags.amenity}` :
@@ -591,8 +641,8 @@ function formatOsmElement(el, center, ringName = null, ringRadiusKm = null) {
   let distToCircleKm = 0;
   let distToCircleMeters = null;
 
-  if (center) {
-    distKm = turf.distance(turf.point([center.lng, center.lat]), turf.point([el.lon, el.lat]), { units: 'kilometers' });
+  if (center && ptLat && ptLng) {
+    distKm = turf.distance(turf.point([center.lng, center.lat]), turf.point([ptLng, ptLat]), { units: 'kilometers' });
     distMi = distKm * 0.621371;
 
     if (ringRadiusKm != null) {
@@ -606,8 +656,8 @@ function formatOsmElement(el, center, ringName = null, ringRadiusKm = null) {
     type,
     ring: ringName || 'Direct',
     address,
-    lat: el.lat,
-    lng: el.lon,
+    lat: ptLat,
+    lng: ptLng,
     distKm,
     distMi,
     distToCircleKm,
